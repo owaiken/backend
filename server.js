@@ -12,20 +12,28 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Enable CORS
-app.use(cors());
+// Enable CORS with specific settings
+app.use(cors({
+  origin: '*', // Allow all origins
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
-// Apply rate limiting
+// Apply rate limiting - with higher limits for development
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per window
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 1000, // Limit each IP to 1000 requests per minute
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-  message: 'Too many requests from this IP, please try again after 15 minutes'
+  message: 'Too many requests from this IP, please try again after 1 minute',
+  skip: (req, res) => {
+    // Skip rate limiting for health checks
+    return req.path === '/api/health';
+  }
 });
 
-// Apply rate limiting to API endpoints
+// Apply rate limiting to API endpoints except health
 app.use('/api/', apiLimiter);
 
 // Store active containers
@@ -649,6 +657,11 @@ app.get('/api/health', (req, res) => {
     memory: process.memoryUsage(),
     timestamp: new Date().toISOString()
   });
+});
+
+// Simple root endpoint for basic connectivity check
+app.get('/', (req, res) => {
+  res.send('Fly.io backend is running');
 });
 
 // Start server
