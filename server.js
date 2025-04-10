@@ -16,8 +16,27 @@ const wss = new WebSocket.Server({ server });
 app.use(cors({
   origin: '*', // Allow all origins
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  exposedHeaders: ['Cross-Origin-Embedder-Policy', 'Cross-Origin-Opener-Policy', 'Cross-Origin-Resource-Policy']
 }));
+
+// Add security headers middleware
+app.use((req, res, next) => {
+  // Add CORP header to allow cross-origin embedding
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  
+  // Add COEP header to allow credentialless requests
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  
+  // Add COOP header for isolation
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  
+  // Add Access-Control-Allow-Origin header
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  
+  next();
+});
 app.use(express.json());
 
 // Apply rate limiting - with higher limits for development
@@ -727,6 +746,113 @@ app.get('/api/health', (req, res) => {
 // Simple root endpoint for basic connectivity check
 app.get('/', (req, res) => {
   res.send('Fly.io backend is running');
+});
+
+// Preview endpoint for serving content
+app.get('/preview/:previewId', (req, res) => {
+  const { previewId } = req.params;
+  
+  // Set special headers for preview iframe
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  
+  const container = containers.get(previewId);
+  if (!container) {
+    return res.status(404).send(`Preview ${previewId} not found. It may have been cleaned up due to inactivity.`);
+  }
+  
+  // Serve index.html from the container directory if it exists
+  const indexPath = path.join(container.dir, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  
+  // If no index.html, try to find any HTML file
+  const files = fs.readdirSync(container.dir, { withFileTypes: true });
+  const htmlFiles = files.filter(file => file.isFile() && file.name.endsWith('.html'));
+  
+  if (htmlFiles.length > 0) {
+    return res.sendFile(path.join(container.dir, htmlFiles[0].name));
+  }
+  
+  // If no HTML files, return a directory listing
+  const fileList = files.map(file => {
+    return `<li><a href="/preview/${previewId}/${file.name}">${file.name}</a></li>`;
+  }).join('');
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Preview ${previewId}</title>
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+      </style>
+    </head>
+    <body>
+      <h1>Directory listing for preview ${previewId}</h1>
+      <ul>${fileList}</ul>
+    </body>
+    </html>
+  `);
+});
+
+// Serve static files from preview containers
+app.get('/preview/:previewId/*', (req, res) => {
+  const { previewId } = req.params;
+  const filePath = req.params[0] || '';
+  
+  // Set special headers for preview content
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  
+  const container = containers.get(previewId);
+  if (!container) {
+    return res.status(404).send(`Preview ${previewId} not found. It may have been cleaned up due to inactivity.`);
+  }
+  
+  const fullPath = path.join(container.dir, filePath);
+  if (!fs.existsSync(fullPath)) {
+    return res.status(404).send(`File not found: ${filePath}`);
+  }
+  
+  if (fs.statSync(fullPath).isDirectory()) {
+    // If directory, try to serve index.html
+    const indexPath = path.join(fullPath, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+    
+    // If no index.html, return directory listing
+    const files = fs.readdirSync(fullPath, { withFileTypes: true });
+    const fileList = files.map(file => {
+      const isDir = file.isDirectory();
+      return `<li><a href="/preview/${previewId}/${filePath}/${file.name}${isDir ? '/' : ''}">${file.name}${isDir ? '/' : ''}</a></li>`;
+    }).join('');
+    
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Directory ${filePath}</title>
+        <style>
+          body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        </style>
+      </head>
+      <body>
+        <h1>Directory listing for ${filePath || '/'}</h1>
+        <ul>${fileList}</ul>
+      </body>
+      </html>
+    `);
+  }
+  
+  // Serve the file
+  res.sendFile(fullPath);
 });
 
 // Start server
