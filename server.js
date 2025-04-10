@@ -89,6 +89,52 @@ wss.on('connection', (ws, req) => {
           url: `/preview/${previewId}`,
           timestamp: Date.now()
         });
+      } else if (data.type === 'terminal-input') {
+        // Handle terminal input
+        const { processId, input } = data;
+        
+        if (!processId || !input) {
+          console.error('Missing processId or input for terminal-input');
+          return;
+        }
+        
+        // Find the process
+        const process = container.processes.get(processId);
+        if (!process) {
+          console.error(`Process ${processId} not found for terminal input`);
+          return;
+        }
+        
+        // Write to the process stdin
+        if (process.stdin) {
+          console.log(`Writing to process ${processId} stdin: ${input.length} characters`);
+          process.stdin.write(input);
+        } else {
+          console.error(`Process ${processId} has no stdin`);
+        }
+      } else if (data.type === 'terminal-resize') {
+        // Handle terminal resize
+        const { processId, cols, rows } = data;
+        
+        if (!processId || !cols || !rows) {
+          console.error('Missing processId, cols, or rows for terminal-resize');
+          return;
+        }
+        
+        // Find the process
+        const process = container.processes.get(processId);
+        if (!process) {
+          console.error(`Process ${processId} not found for terminal resize`);
+          return;
+        }
+        
+        // Resize the terminal if supported
+        if (process.resize) {
+          console.log(`Resizing terminal for process ${processId} to ${cols}x${rows}`);
+          process.resize({ cols, rows });
+        } else {
+          console.log(`Process ${processId} does not support resize`);
+        }
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error);
@@ -169,6 +215,124 @@ app.post('/api/files/write/:previewId', express.json(), (req, res) => {
   }
 });
 
+// API endpoint for creating directories
+app.post('/api/files/mkdir/:previewId', express.json(), (req, res) => {
+  const { previewId } = req.params;
+  const { path: dirPath, recursive = true } = req.body;
+  
+  if (!dirPath) {
+    return res.status(400).json({ error: 'Missing path parameter' });
+  }
+  
+  let container = containers.get(previewId);
+  if (!container) {
+    container = createContainer(previewId);
+    containers.set(previewId, container);
+  }
+  
+  try {
+    // Create directory
+    const fullPath = path.join(container.dir, dirPath);
+    fs.mkdirSync(fullPath, { recursive });
+    
+    console.log(`Created directory ${dirPath} for preview: ${previewId}`);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error(`Error creating directory ${dirPath}:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API endpoint for reading directory contents
+app.get('/api/files/readdir/:previewId', (req, res) => {
+  const { previewId } = req.params;
+  const { path: dirPath } = req.query;
+  const withFileTypes = req.query.withFileTypes === 'true';
+  
+  if (!dirPath) {
+    return res.status(400).json({ error: 'Missing path parameter' });
+  }
+  
+  const container = containers.get(previewId);
+  if (!container) {
+    return res.status(404).json({ error: 'Container not found' });
+  }
+  
+  try {
+    // Read directory
+    const fullPath = path.join(container.dir, dirPath);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'Directory not found' });
+    }
+    
+    const entries = fs.readdirSync(fullPath, { withFileTypes });
+    
+    if (withFileTypes) {
+      // Convert Dirent objects to serializable objects
+      const serializedEntries = entries.map(entry => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+        isFile: entry.isFile(),
+        isSymbolicLink: entry.isSymbolicLink()
+      }));
+      
+      return res.json({ entries: serializedEntries });
+    }
+    
+    return res.json({ entries });
+  } catch (error) {
+    console.error(`Error reading directory ${dirPath}:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API endpoint for removing files or directories
+app.post('/api/files/rm/:previewId', express.json(), (req, res) => {
+  const { previewId } = req.params;
+  const { path: filePath, recursive = false } = req.body;
+  
+  if (!filePath) {
+    return res.status(400).json({ error: 'Missing path parameter' });
+  }
+  
+  const container = containers.get(previewId);
+  if (!container) {
+    return res.status(404).json({ error: 'Container not found' });
+  }
+  
+  try {
+    // Remove file or directory
+    const fullPath = path.join(container.dir, filePath);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'File or directory not found' });
+    }
+    
+    if (fs.statSync(fullPath).isDirectory()) {
+      fs.rmdirSync(fullPath, { recursive });
+    } else {
+      fs.unlinkSync(fullPath);
+    }
+    
+    // Remove from memory cache if it exists
+    container.files.delete(filePath);
+    
+    console.log(`Removed ${filePath} for preview: ${previewId}`);
+    
+    // Notify clients of file change
+    broadcastToContainer(previewId, {
+      type: 'file-change',
+      previewId,
+      path: filePath
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error(`Error removing ${filePath}:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/files/read/:previewId', (req, res) => {
   const { previewId } = req.params;
   const { path: filePath } = req.query;
@@ -206,7 +370,12 @@ app.get('/api/files/read/:previewId', (req, res) => {
 // API endpoint for executing code
 app.post('/api/execute/:previewId', express.json(), (req, res) => {
   const { previewId } = req.params;
-  const { command, args = [], cwd = '/' } = req.body;
+  const { command, args = [], cwd = '/', terminal = null } = req.body;
+  
+  // Log terminal options if provided
+  if (terminal) {
+    console.log(`Terminal options provided: cols=${terminal.cols}, rows=${terminal.rows}`);
+  }
   
   if (!command) {
     return res.status(400).json({ error: 'Missing command parameter' });
@@ -227,12 +396,65 @@ app.post('/api/execute/:previewId', express.json(), (req, res) => {
     
     console.log(`Executing command in container ${previewId}: ${command} ${args.join(' ')}`);
     
-    // Execute command
-    const childProcess = exec(
-      `${command} ${args.join(' ')}`,
-      { cwd: workingDir },
-      (error, stdout, stderr) => {
-        // Process completed
+    // Special handling for shell commands
+    let commandToExecute = command;
+    let argsToUse = [...args];
+    
+    // Handle /bin/jsh command specially
+    if (command === '/bin/jsh') {
+      console.log('Detected jsh shell command, using bash instead');
+      commandToExecute = '/bin/bash';
+      // If args contain --osc, remove it as it's specific to jsh
+      argsToUse = args.filter(arg => arg !== '--osc');
+    }
+    
+    console.log(`Modified command: ${commandToExecute} ${argsToUse.join(' ')}`);
+    
+    // Prepare exec options
+    const execOptions = {
+      cwd: workingDir,
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        TERM_PROGRAM: 'bolt'
+      }
+    };
+    
+    // If terminal dimensions are provided, use them
+    if (terminal && terminal.cols && terminal.rows) {
+      execOptions.env.COLUMNS = terminal.cols.toString();
+      execOptions.env.LINES = terminal.rows.toString();
+    }
+    
+    // Use spawn instead of exec for interactive shells to get access to stdin
+    const isInteractiveShell = commandToExecute === '/bin/bash';
+    let childProcess;
+    
+    if (isInteractiveShell) {
+      // Use spawn for interactive shells
+      const { spawn } = require('child_process');
+      childProcess = spawn(commandToExecute, argsToUse, {
+        ...execOptions,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      
+      // Add resize method for terminal resizing
+      childProcess.resize = ({ cols, rows }) => {
+        try {
+          // We can't directly resize the terminal, but we can set environment variables
+          // that the shell might use
+          process.env.COLUMNS = cols.toString();
+          process.env.LINES = rows.toString();
+          console.log(`Set terminal size to ${cols}x${rows}`);
+        } catch (error) {
+          console.error('Error resizing terminal:', error);
+        }
+      };
+      
+      // Handle process exit
+      childProcess.on('exit', (code) => {
+        console.log(`Process ${processId} exited with code ${code}`);
         container.processes.delete(processId);
         
         // Notify clients of process completion
@@ -240,12 +462,78 @@ app.post('/api/execute/:previewId', express.json(), (req, res) => {
           type: 'process-completed',
           previewId,
           processId,
-          exitCode: error ? error.code : 0,
-          stdout,
-          stderr
+          exitCode: code || 0,
+          stdout: '', // We've already streamed the output
+          stderr: ''
         });
-      }
-    );
+      });
+      
+      // Stream stdout
+      childProcess.stdout.on('data', (data) => {
+        const output = data.toString();
+        broadcastToContainer(previewId, {
+          type: 'process-output',
+          previewId,
+          processId,
+          output,
+          stream: 'stdout'
+        });
+      });
+      
+      // Stream stderr
+      childProcess.stderr.on('data', (data) => {
+        const output = data.toString();
+        broadcastToContainer(previewId, {
+          type: 'process-output',
+          previewId,
+          processId,
+          output,
+          stream: 'stderr'
+        });
+      });
+    } else {
+      // Use exec for non-interactive commands
+      childProcess = exec(
+        `${commandToExecute} ${argsToUse.join(' ')}`,
+        execOptions,
+        (error, stdout, stderr) => {
+          // Process completed
+          container.processes.delete(processId);
+          
+          // Notify clients of process completion
+          broadcastToContainer(previewId, {
+            type: 'process-completed',
+            previewId,
+            processId,
+            exitCode: error ? error.code : 0,
+            stdout,
+            stderr
+          });
+        }
+      );
+      
+      // Stream stdout
+      childProcess.stdout.on('data', (data) => {
+        broadcastToContainer(previewId, {
+          type: 'process-output',
+          previewId,
+          processId,
+          output: data.toString(),
+          stream: 'stdout'
+        });
+      });
+      
+      // Stream stderr
+      childProcess.stderr.on('data', (data) => {
+        broadcastToContainer(previewId, {
+          type: 'process-output',
+          previewId,
+          processId,
+          output: data.toString(),
+          stream: 'stderr'
+        });
+      });
+    }
     
     // Store process reference
     container.processes.set(processId, childProcess);
