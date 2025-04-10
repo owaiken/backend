@@ -41,6 +41,18 @@ app.use(cors());
 app.options('*', (req, res) => {
   res.status(204).end();
 });
+
+// Health check endpoint for Fly.io
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    version: '1.0.0',
+    containers: wss.clients.size,
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    timestamp: new Date().toISOString()
+  });
+});
 app.use(express.json());
 
 // Apply rate limiting - with higher limits for development
@@ -463,39 +475,61 @@ app.get('/api/files/read/:previewId', (req, res) => {
   }
 });
 
-// API endpoint for executing code
-app.post('/api/execute/:previewId', express.json(), (req, res) => {
-  // Explicitly set CORS headers for this critical endpoint
+// Handle OPTIONS requests for execute endpoint specifically
+app.options('/api/execute/:previewId', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Credentials', 'true');
-  const { previewId } = req.params;
-  const { command, args = [], cwd = '/', terminal = null } = req.body;
-  
-  // Log terminal options if provided
-  if (terminal) {
-    console.log(`Terminal options provided: cols=${terminal.cols}, rows=${terminal.rows}`);
-  }
-  
-  if (!command) {
-    return res.status(400).json({ error: 'Missing command parameter' });
-  }
-  
-  let container = containers.get(previewId);
-  if (!container) {
-    container = createContainer(previewId);
-    containers.set(previewId, container);
-  }
-  
+  res.status(204).end();
+});
+
+// API endpoint for executing code
+app.post('/api/execute/:previewId', express.json(), (req, res) => {
   try {
+    console.log(`[EXECUTE] Received request for preview: ${req.params.previewId}`);
+    console.log(`[EXECUTE] Request body:`, JSON.stringify(req.body));
+    console.log(`[EXECUTE] Origin:`, req.headers.origin);
+    console.log(`[EXECUTE] Content-Type:`, req.headers['content-type']);
+    
+    // Explicitly set CORS headers for this critical endpoint
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    
+    const { previewId } = req.params;
+    const { command, args = [], cwd = '/', terminal = null } = req.body;
+    
+    // Log terminal options if provided
+    if (terminal) {
+      console.log(`[EXECUTE] Terminal options provided: cols=${terminal.cols}, rows=${terminal.rows}`);
+    }
+    
+    if (!command) {
+      console.log(`[EXECUTE] Error: Missing command parameter`);
+      return res.status(400).json({ error: 'Missing command parameter' });
+    }
+    
+    console.log(`[EXECUTE] Looking for container: ${previewId}`);
+    console.log(`[EXECUTE] Available containers: ${Array.from(containers.keys()).join(', ')}`);
+    
+    let container = containers.get(previewId);
+    if (!container) {
+      console.log(`[EXECUTE] Container not found, creating new container for: ${previewId}`);
+      container = createContainer(previewId);
+      containers.set(previewId, container);
+    }
+    
     const processId = uuidv4();
     const workingDir = path.join(container.dir, cwd);
     
     // Ensure working directory exists
     fs.mkdirSync(workingDir, { recursive: true });
     
-    console.log(`Executing command in container ${previewId}: ${command} ${args.join(' ')}`);
+    console.log(`[EXECUTE] Process ID: ${processId}`);
+    console.log(`[EXECUTE] Working directory: ${workingDir}`);
+    console.log(`[EXECUTE] Executing command in container ${previewId}: ${command} ${args.join(' ')}`);
     
     // Special handling for shell commands
     let commandToExecute = command;
@@ -668,8 +702,20 @@ app.post('/api/execute/:previewId', express.json(), (req, res) => {
       });
     });
   } catch (error) {
-    console.error(`Error executing command:`, error);
-    res.status(500).json({ error: error.message });
+    console.error(`[EXECUTE] Error executing command:`, error);
+    console.error(`[EXECUTE] Stack trace:`, error.stack);
+    
+    // Ensure CORS headers are set even in error responses
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    
+    res.status(500).json({
+      error: error.message,
+      stack: error.stack,
+      previewId: req.params.previewId
+    });
   }
 });
 
