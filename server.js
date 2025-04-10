@@ -10,10 +10,21 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+
+// Configure WebSocket server with proper error handling
+const wss = new WebSocket.Server({ 
+  server,
+  // Allow connections from any origin
+  verifyClient: (info) => {
+    console.log(`[WebSocket] Connection attempt from origin: ${info.origin}`);
+    return true; // Accept all connections
+  }
+});
 
 // Direct CORS handling middleware - applied before any routes
 app.use((req, res, next) => {
+  console.log(`[CORS] Request from origin: ${req.headers.origin || 'unknown'} to path: ${req.path} method: ${req.method}`);
+  
   // Always set these headers for all responses
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
@@ -28,6 +39,7 @@ app.use((req, res, next) => {
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
+    console.log(`[CORS] Handling OPTIONS preflight request for path: ${req.path}`);
     return res.status(204).end();
   }
   
@@ -37,8 +49,13 @@ app.use((req, res, next) => {
 // Apply CORS to all routes as a fallback
 app.use(cors());
 
-// Handle OPTIONS requests globally
+// Handle OPTIONS requests globally with explicit headers
 app.options('*', (req, res) => {
+  console.log(`[CORS] Global OPTIONS handler for path: ${req.path}`);
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
   res.status(204).end();
 });
 
@@ -91,42 +108,63 @@ function createContainer(previewId) {
 
 // WebSocket handling
 wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, 'http://localhost');
-  const previewId = url.searchParams.get('previewId');
-  
-  if (!previewId) {
-    ws.close();
-    return;
-  }
-  
-  console.log(`New WebSocket connection for preview: ${previewId}`);
-  
-  // Get or create container
-  let container = containers.get(previewId);
-  if (!container) {
-    container = createContainer(previewId);
-    containers.set(previewId, container);
-    console.log(`Created new container for preview: ${previewId}`);
-  }
-  
-  // Add this client to the container
-  container.clients.add(ws);
-  
-  // Send connection acknowledgment
-  ws.send(JSON.stringify({
-    type: 'connection-established',
-    previewId,
-    timestamp: Date.now()
-  }));
-  
-  ws.on('message', (message) => {
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    const previewId = url.searchParams.get('previewId');
+    const processId = url.searchParams.get('processId');
+    
+    // Log connection details
+    console.log(`[WebSocket] New connection: ${req.url}`);
+    console.log(`[WebSocket] Headers:`, JSON.stringify(req.headers));
+    console.log(`[WebSocket] Preview ID: ${previewId}, Process ID: ${processId || 'none'}`);
+    
+    if (!previewId) {
+      console.log(`[WebSocket] Closing connection - missing previewId`);
+      ws.close(1008, 'Missing previewId parameter');
+      return;
+    }
+    
+    // Get or create container
+    let container = containers.get(previewId);
+    if (!container) {
+      console.log(`[WebSocket] Creating new container for preview: ${previewId}`);
+      container = createContainer(previewId);
+      containers.set(previewId, container);
+    }
+    
+    // Add this client to the container
+    container.clients.add(ws);
+    console.log(`[WebSocket] Client added to container. Total clients: ${container.clients.size}`);
+    
+    // Send connection acknowledgment
+    ws.send(JSON.stringify({
+      type: 'connection-established',
+      previewId,
+      processId,
+      timestamp: Date.now(),
+      clientCount: container.clients.size
+    }));
+    
+    // Set up ping/pong to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.ping();
+      }
+    }, 30000);
+    
+    // Handle pong responses
+    ws.on('pong', () => {
+      console.log(`[WebSocket] Received pong from client for preview: ${previewId}`);
+    });
+    
+    ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
-      console.log(`Received message from client: ${JSON.stringify(data)}`);
+      console.log(`[WebSocket] Received message from client for preview: ${previewId}:`, JSON.stringify(data));
       
       // Validate message has a type
       if (!data.type) {
-        console.error('WebSocket message missing type field');
+        console.error('[WebSocket] Message missing type field');
         ws.send(JSON.stringify({
           type: 'error',
           error: 'Missing type field in message',
@@ -258,6 +296,12 @@ wss.on('connection', (ws, req) => {
       console.error('Error sending error message to client:', sendError);
     }
   });
+  } catch (error) {
+    console.error(`[WebSocket] Error in connection handler:`, error);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1011, 'Internal server error');
+    }
+  }
 });
 
 // Broadcast to all clients for a container
@@ -537,10 +581,16 @@ app.post('/api/execute/:previewId', express.json(), (req, res) => {
     
     // Handle /bin/jsh command specially
     if (command === '/bin/jsh') {
-      console.log('Detected jsh shell command, using bash instead');
-      commandToExecute = '/bin/bash';
+      console.log('[EXECUTE] Detected jsh shell command, using sh instead');
+      commandToExecute = '/bin/sh';
       // If args contain --osc, remove it as it's specific to jsh
       argsToUse = args.filter(arg => arg !== '--osc');
+    }
+    
+    // Handle /bin/bash command specially (for Alpine Linux compatibility)
+    if (command === '/bin/bash') {
+      console.log('[EXECUTE] Detected bash shell command, using sh instead');
+      commandToExecute = '/bin/sh';
     }
     
     console.log(`Modified command: ${commandToExecute} ${argsToUse.join(' ')}`);
@@ -563,7 +613,7 @@ app.post('/api/execute/:previewId', express.json(), (req, res) => {
     }
     
     // Use spawn instead of exec for interactive shells to get access to stdin
-    const isInteractiveShell = commandToExecute === '/bin/bash';
+    const isInteractiveShell = commandToExecute === '/bin/sh';
     let childProcess;
     
     if (isInteractiveShell) {
