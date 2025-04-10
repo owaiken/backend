@@ -77,10 +77,41 @@ wss.on('connection', (ws, req) => {
   // Add this client to the container
   container.clients.add(ws);
   
+  // Send connection acknowledgment
+  ws.send(JSON.stringify({
+    type: 'connection-established',
+    previewId,
+    timestamp: Date.now()
+  }));
+  
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
       console.log(`Received message from client: ${JSON.stringify(data)}`);
+      
+      // Validate message has a type
+      if (!data.type) {
+        console.error('WebSocket message missing type field');
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'Missing type field in message',
+          timestamp: Date.now()
+        }));
+        return;
+      }
+      
+      // Ensure container exists
+      const container = containers.get(previewId);
+      if (!container) {
+        console.error(`Container not found for preview: ${previewId}`);
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'Container not found',
+          previewId,
+          timestamp: Date.now()
+        }));
+        return;
+      }
       
       // Handle different message types
       if (data.type === 'file-change') {
@@ -153,17 +184,43 @@ wss.on('connection', (ws, req) => {
     console.log(`WebSocket connection closed for preview: ${previewId}`);
     
     // Remove client from container
-    container.clients.delete(ws);
+    const container = containers.get(previewId);
+    if (container) {
+      container.clients.delete(ws);
+      console.log(`Removed client from container ${previewId}, ${container.clients.size} clients remaining`);
+      
+      // Clean up empty containers after some time
+      if (container.clients.size === 0) {
+        console.log(`No clients left for container ${previewId}, scheduling cleanup in 5 minutes`);
+        setTimeout(() => {
+          if (containers.get(previewId)?.clients.size === 0) {
+            // Clean up container resources
+            console.log(`Cleaning up container for preview: ${previewId}`);
+            containers.delete(previewId);
+          }
+        }, 300000); // 5 minutes
+      }
+    } else {
+      console.error(`Cannot remove client: Container not found for preview: ${previewId}`);
+    }
+  });
+  
+  // Handle WebSocket errors
+  ws.on('error', (error) => {
+    console.error(`WebSocket error for preview ${previewId}:`, error);
     
-    // Clean up empty containers after some time
-    if (container.clients.size === 0) {
-      setTimeout(() => {
-        if (containers.get(previewId)?.clients.size === 0) {
-          // Clean up container resources
-          console.log(`Cleaning up container for preview: ${previewId}`);
-          containers.delete(previewId);
-        }
-      }, 300000); // 5 minutes
+    try {
+      // Send error to client if still connected
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'WebSocket connection error',
+          message: error.message,
+          timestamp: Date.now()
+        }));
+      }
+    } catch (sendError) {
+      console.error('Error sending error message to client:', sendError);
     }
   });
 });
@@ -171,16 +228,24 @@ wss.on('connection', (ws, req) => {
 // Broadcast to all clients for a container
 function broadcastToContainer(previewId, data) {
   const container = containers.get(previewId);
-  if (container) {
-    const message = JSON.stringify(data);
-    console.log(`Broadcasting to container ${previewId}: ${message}`);
-    
-    for (const client of container.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
+  if (!container) {
+    console.error(`Cannot broadcast: Container not found for preview: ${previewId}`);
+    return;
+  }
+  
+  const message = JSON.stringify(data);
+  const clientCount = container.clients.size;
+  console.log(`Broadcasting message to ${clientCount} clients for preview ${previewId}: ${data.type}`);
+  
+  let sentCount = 0;
+  for (const client of container.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+      sentCount++;
     }
   }
+  
+  console.log(`Successfully sent message to ${sentCount}/${clientCount} clients`);
 }
 
 // API endpoints for file operations
