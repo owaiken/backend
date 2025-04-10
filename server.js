@@ -32,8 +32,16 @@ app.use((req, res, next) => {
   // Add COOP header for isolation
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   
-  // Add Access-Control-Allow-Origin header
+  // Add CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  // Handle preflight OPTIONS requests
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
   
   next();
 });
@@ -459,8 +467,23 @@ app.get('/api/files/read/:previewId', (req, res) => {
   }
 });
 
+// Handle OPTIONS requests for CORS preflight
+app.options('/api/execute/:previewId', (req, res) => {
+  // Set CORS headers for preflight
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.status(204).end();
+});
+
 // API endpoint for executing code
 app.post('/api/execute/:previewId', express.json(), (req, res) => {
+  // Set CORS headers explicitly for this endpoint
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   const { previewId } = req.params;
   const { command, args = [], cwd = '/', terminal = null } = req.body;
   
