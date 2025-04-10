@@ -12,44 +12,35 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Configure CORS middleware with more permissive settings
-const corsOptions = {
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  credentials: true,
-  maxAge: 86400, // 24 hours in seconds - how long the results of a preflight request can be cached
-  preflightContinue: false,
-  optionsSuccessStatus: 204
-};
-
-// Apply CORS to all routes
-app.use(cors(corsOptions));
-
-// Add security headers middleware
+// Direct CORS handling middleware - applied before any routes
 app.use((req, res, next) => {
-  // Add CORP header to allow cross-origin embedding
-  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  // Always set these headers for all responses
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400'); // 24 hours
   
-  // Add COEP header to allow credentialless requests
-  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  // Security headers
+  res.header('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.header('Cross-Origin-Embedder-Policy', 'credentialless');
+  res.header('Cross-Origin-Opener-Policy', 'same-origin');
   
-  // Add COOP header for isolation
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  
-  // Ensure CORS headers are present (belt and suspenders approach)
-  if (!res.getHeader('Access-Control-Allow-Origin')) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
   }
   
   next();
 });
 
+// Apply CORS to all routes as a fallback
+app.use(cors());
+
 // Handle OPTIONS requests globally
-app.options('*', cors(corsOptions));
+app.options('*', (req, res) => {
+  res.status(204).end();
+});
 app.use(express.json());
 
 // Apply rate limiting - with higher limits for development
@@ -473,7 +464,12 @@ app.get('/api/files/read/:previewId', (req, res) => {
 });
 
 // API endpoint for executing code
-app.post('/api/execute/:previewId', cors(corsOptions), express.json(), (req, res) => {
+app.post('/api/execute/:previewId', express.json(), (req, res) => {
+  // Explicitly set CORS headers for this critical endpoint
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
   const { previewId } = req.params;
   const { command, args = [], cwd = '/', terminal = null } = req.body;
   

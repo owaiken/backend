@@ -28,6 +28,22 @@ primary_region = 'ewr'
   [[services.ports]]
     port = 443
     handlers = ['tls', 'http']
+    
+  [[services.http_checks]]
+    interval = 10000
+    grace_period = '5s'
+    method = 'get'
+    path = '/api/health'
+    protocol = 'http'
+    timeout = 2000
+
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = 'connections'
+
+  [[services.http_options]]
+    response_headers = { 'Access-Control-Allow-Origin' = '*', 'Access-Control-Allow-Methods' = 'GET, POST, PUT, DELETE, OPTIONS', 'Access-Control-Allow-Headers' = 'Content-Type, Authorization, X-Requested-With, Accept', 'Access-Control-Allow-Credentials' = 'true', 'Cross-Origin-Resource-Policy' = 'cross-origin', 'Cross-Origin-Embedder-Policy' = 'credentialless', 'Cross-Origin-Opener-Policy' = 'same-origin' }
 
 [[vm]]
   memory = '1gb'
