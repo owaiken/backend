@@ -12,7 +12,8 @@
     "ws": "^8.13.0",
     "cors": "^2.8.5",
     "dockerode": "^3.3.5",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "express-rate-limit": "^7.1.5"
   },
   "devDependencies": {
     "nodemon": "^2.0.22"

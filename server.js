@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,13 +16,25 @@ const wss = new WebSocket.Server({ server });
 app.use(cors());
 app.use(express.json());
 
+// Apply rate limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per window
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  message: 'Too many requests from this IP, please try again after 15 minutes'
+});
+
+// Apply rate limiting to API endpoints
+app.use('/api/', apiLimiter);
+
 // Store active containers
 const containers = new Map();
 
 // Create a container for a preview
 function createContainer(previewId) {
-  // This is a simplified example - you'd use Docker API in production
-  const containerDir = path.join('/tmp', previewId);
+  // Use the persistent volume mounted at /data
+  const containerDir = path.join('/data', previewId);
   fs.mkdirSync(containerDir, { recursive: true });
   
   return {
@@ -336,6 +349,18 @@ app.get('/preview/:previewId/*', (req, res) => {
   } else {
     res.status(404).send('File not found');
   }
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    version: '1.0.0',
+    containers: containers.size,
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Start server
